@@ -1,0 +1,1049 @@
+#!/bin/bash
+#
+# ------------------------------------------------------------------------------
+#  Copyright (c) 2022, Guillaume ARMEDE & SciantiaDB
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+#  1. Redistributions of source code must retain the above copyright
+#     notice, this list of conditions and the following disclaimer.
+#  2. Redistributions in binary form must reproduce the above copyright
+#     notice, this list of conditions and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHORS ''AS IS'' AND ANY EXPRESS OR
+# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+# OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+# INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# ------------------------------------------------------------------------------
+# Replication  functions for module pglogical :
+# ---------------------------------------------
+
+dbtrace_sql="
+CREATE SCHEMA dbtrace ;
+COMMENT ON SCHEMA dbtrace IS 'Trace DDL on database cause of logical replication ';
+
+CREATE TABLE dbtrace.trace_ddl (
+classid oid ,
+objid oid ,
+objsubid integer ,
+command_tag text,
+object_type text ,
+schema_name text ,
+object_identity text ,
+in_extension bool ,
+by text ,
+at timestamptz DEFAULT NOW()
+) ;
+
+CREATE OR REPLACE FUNCTION dbtrace.f_trace_ddl() RETURNS event_trigger AS \$body\$
+DECLARE
+l_obj record;
+l_table_name character varying := '';
+BEGIN
+for l_obj in select * from pg_event_trigger_ddl_commands()
+LOOP
+/* IF command_tag */
+ INSERT INTO dbtrace.trace_ddl(classid,objid,objsubid,command_tag,object_type,schema_name,object_identity,in_extension,by)
+ VALUES (l_obj.classid,l_obj.objid,l_obj.objsubid,quote_ident(l_obj.command_tag),quote_ident(l_obj.object_type),quote_ident(l_obj.schema_name),quote_ident(l_obj.object_identity),l_obj.in_extension,current_user);
+/* END IF command_tag */
+END LOOP ;
+END ;
+\$body\$ LANGUAGE plpgsql ;
+
+/* DDL END */
+
+-- IF  :pg_server_num >= 100000
+-- THEN
+CREATE   EVENT TRIGGER tg_trace_ddl ON ddl_command_end
+WHEN TAG IN ('CREATE TABLE','ALTER TABLE')
+EXECUTE FUNCTION dbtrace.f_trace_ddl() ;
+"
+
+
+#############   NODE SECTION ###############
+
+function f_create_replicate_node(){
+# if [ "${concern_item}" != "provider" ] ||  [ "${concern_item}" != "subscriber" ] ; then
+#
+# fi
+case ${concern_item} in
+  provider)
+  psql_connexion="${psql_pub_connexion}"
+  node_name="${pub_name}"
+  node_host="${pub_host}"
+  node_port="${pub_port}"
+  node_db="${pub_dbname}"
+  node_user="${pub_user}"
+  node_user_pwd="${pub_user_passwd}"
+  ;;
+  subscriber)
+  psql_connexion="${psql_sub_connexion}"
+  node_name="${sub_name}"
+  node_host="${sub_host}"
+  node_port="${sub_port}"
+  node_db="${sub_dbname}"
+  node_user="${sub_user}"
+  node_user_pwd="${sub_user_passwd}"
+  ;;
+  *)
+  f_log failed ${action_task} "An item must be indicate : provider or subscriber for node creation "
+  exit 2
+  ;;
+  esac
+
+local check_statement="select 'exists' from pglogical.node WHERE node_name = '${node_name}'"
+result=$( ${psql_connexion} -c "${check_statement}" )
+
+if [ "${result}" != "exists" ]; then
+        local create_statement="SELECT pglogical.create_node(
+            node_name := '${node_name}',
+            dsn := 'hostaddr=${node_host} port=${node_port} dbname=${node_db} user=${node_user} password=${node_user_pwd}'
+        );"
+
+        if [ "${isverbose}" == "true" ]; then
+          f_log debug ${action_task} "Running : ${psql_connexion} -c \"${create_statement}\" "
+        fi
+
+        if [ "${dryrun}" == "true" ];then
+         f_log info  ${action_task} "/* Dryrun */  Create node : ${node_name} with dsn : hostaddr=${node_host} port=${node_port} dbname=${node_db} user=${node_user}"
+         return_code=0
+        else
+            result=$( ${psql_connexion} -c "${create_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+            if [ $? -eq 0 ]; then
+             f_log success ${action_task} "Create node : ${node_name} with dsn : hostaddr=${node_host} port=${node_port} dbname=${node_db} user=${node_user}"
+             return_code=0
+            else
+             f_log failed ${action_task}  "Create node : ${node_name} with dsn : hostaddr=${node_host} port=${node_port} dbname=${node_db} user=${node_user}"
+             return_code=1
+            fi
+        fi
+fi
+
+return ${return_code}
+
+} # OK
+
+function f_drop_replication_node(){
+  if [ -z "${concern_item}" ]; then
+   f_log failed ${action_task} "An item must be indicate : provider or subscriber for node deletion "
+   exit 2
+  fi
+  case ${concern_item} in
+    provider)
+    psql_connexion="${psql_pub_connexion}"
+    node_name="${pub_name}"
+
+    ;;
+    subscriber)
+    psql_connexion="${psql_sub_connexion}"
+    node_name="${sub_name}"
+    ;;
+    esac
+
+  local drop_statement="SELECT pglogical.drop_node(
+      node_name := '${node_name}',
+      ifexists := true
+  );"
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_connexion} -c \"${drop_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */  Drop node : ${node_name}"
+ return_code=0
+else
+  result=$( ${psql_connexion} -c "${drop_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+   f_log success ${action_task} "Drop node : ${node_name} "
+   return_code=0
+  else
+   f_log failed ${action_task}  "Drop node : ${node_name}"
+   return_code=1
+  fi
+fi
+  return ${return_code}
+
+} # OK
+
+function f_display_replication_node(){
+
+if [ -z "${concern_item}" ]; then
+ f_log failed ${action_task} "An item must be indicate : provider or subscriber for node information "
+ exit 2
+fi
+case ${concern_item} in
+provider)
+psql_connexion="${psql_pub_connexion}"
+node_name="${pub_name}"
+
+;;
+subscriber)
+psql_connexion="${psql_sub_connexion}"
+node_name="${sub_name}"
+;;
+*)
+f_log failed ${action_task} " Item : ${concern_item} is unknown . Used : provider or subscriber "
+;;
+esac
+
+local monit_statement="SELECT * FROM pglogical.node n JOIN pglogical.node_interface i ON n.node_id = i.if_nodeid WHERE n.node_name = '${node_name}' "
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_connexion} -c \"${monit_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */  Display node : ${pub_name} informations "
+ return_code=0
+else
+    result=$( ${psql_connexion} --field-separator=";"  -c "${monit_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     #  f_log success ${action_task} "Display node : ${node_name} informations "
+     echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+     awk -F';' '
+     BEGIN {}
+     {
+     printf "\n Node Informations :\n"
+     printf "---------------------\n"
+     printf "\t- %-20s : %s \n","node_id",$1
+     printf "\t- %-20s : %s \n","node_name",$2
+     printf "\t- %-20s : %s \n","if_id",$3
+     printf "\t- %-20s : %s \n","if_name",$4
+     printf "\t- %-20s : %s \n","if_nodeid",$5
+     printf "\t- %-20s : %s \n","if_dsn",$6
+     }
+     END {printf "\n" }
+      '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+     return_code=0
+    else
+     f_log failed ${action_task}  "Display node : ${node_name} informations"
+     return_code=1
+    fi
+
+fi
+return ${return_code}
+} # OK
+
+#############  END NODE  SECTION ###############
+
+
+#############   STRUCTURE SECTION  ###############
+
+function f_create_structure_on_subscriber(){
+
+
+local provider_dsn
+local subscriber_dsn
+
+case ${method_name} in
+direct)
+
+pgdump_pub_connexion="pg_dump  --port=${pub_port} --host=${pub_host} --username=${pub_user} --dbname=${pub_dbname} --format=plain --schema-only --verbose "
+subscriber_dsn="${psql_sub_connexion}"
+
+  if [ "${concern_item}" != "all" ] && [ ! -z "${concern_item}" ] ;  then
+  to_dump=" -t ${concern_item}"
+  elif [ "${concern_item}" == "all" ]; then
+  to_dump=" -n ${pub_schema} "
+  else
+  f_log warning ${action_task} "Error case"
+  exit 2
+  fi
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${pgdump_pub_connexion} ${to_dump} | ${subscriber_dsn} "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */  Create structure for ${concern_item} relation ${method_name} "
+ return_code=0
+else
+ result=$( ${pgdump_pub_connexion} ${to_dump} | ${subscriber_dsn} 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+  f_log success ${action_task} "Dump / Load On-fly  "
+  return_code=0
+  else
+  f_log success ${action_task} "Dump / Load On-fly  "
+  return_code=1
+  fi
+fi
+;;
+
+disk)
+if [ "${concern_item}" != "all" ] && [ ! -z "${concern_item}" ] ;  then
+to_dump=" -t ${concern_item}"
+elif [ "${concern_item}" == "all" ]; then
+to_dump=" -n ${pub_schema} "
+else
+f_log warning ${action_task} "Error case "
+exit 2
+fi
+
+pgdump_pub_connexion="pg_dump  --port=${pub_port} --host=${pub_host} --username=${pub_user} --dbname=${pub_dbname} --format=plain --schema-only --verbose "
+subscriber_dsn="${psql_sub_connexion}"
+result=$( ${pgdump_pub_connexion} ${to_dump} --file=${path_to_dump}/pgspiegel_export.sql   2>> ${log_directory}/${tool}_${mainjobdate}.err )
+if [ $? -eq 0 ]; then
+  f_log success ${action_task} "Dump done"
+else
+  return_code=1
+fi
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${pgdump_pub_connexion} ${to_dump} --file=${path_to_dump}/pgspiegel_export.sql  "
+fi
+
+if [ "${dryrun}" == "true" ];then
+  f_log info  ${action_task} "/* Dryrun */  Create structure for ${concern_item} relation ${method_name} "
+  return_code=0
+else
+  result=$( ${pgdump_pub_connexion} ${to_dump} --file=${path_to_dump}/pgspiegel_export.sql   2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+    f_log success ${action_task} "Dump On-Disk  "
+    if [ "${isverbose}" == "true" ]; then
+      f_log debug ${action_task} "Running :  ${subscriber_dsn}  --file=${path_to_dump}/pgspiegel_export.sql  "
+    fi
+
+    if [ "${dryrun}" == "true" ];then
+      f_log info  ${action_task} "/* Dryrun */  import structure for ${concern_item} relation ${method_name} "
+      return_code=0
+    else
+      result=$( ${subscriber_dsn}  --file=${path_to_dump}/pgspiegel_export.sql   2>> ${log_directory}/${tool}_${mainjobdate}.err )
+      if [ $? -eq 0 ]; then
+        f_log success ${action_task} "Dump / Load On-Disk  "
+        return_code=0
+      else
+        f_log success ${action_task} "Dump / Load On-Disk  "
+        return_code=1
+      fi
+    fi
+
+  else
+  f_log success ${action_task} "Dump On-Disk  "
+  return_code=1
+  fi
+fi
+;;
+esac
+
+return ${return_code}
+
+} # IN PROGRESS
+
+#############  END STRUCTURE SECTION  ###############
+
+
+
+#############  INTERFACE SECTION ###############
+function f_create_interface_on_node(){
+
+# pglogical.alter_node_add_interface(node_name name, interface_name name, dsn text)
+local create_statement="SELECT pglogical.alter_node_add_interface(
+    node_name := '${pub_name}',
+    interface_name := '${pub_interface_name}',
+    dsn := 'hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user}'
+    );"
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${create_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Create interface : ${pub_interface_name} on node : ${pub_name} with dsn : hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user}"
+ return_code=0
+else
+    result=$( ${psql_pub_connexion} -c "${create_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     f_log success ${action_task} "Create interface : ${pub_interface_name} on node : ${pub_name} with dsn : hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user}"
+     return_code=0
+    else
+     f_log failed ${action_task}  "Create interface : ${pub_interface_name} on node : ${pub_name} with dsn : hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user}"
+     return_code=1
+    fi
+fi
+return ${return_code}
+
+} # OK
+
+function f_drop_interface_on_node(){
+# pglogical.alter_node_drop_interface(node_name name, interface_name name)
+local drop_statement="SELECT pglogical.alter_node_drop_interface(
+       node_name := '${pub_name}',
+       interface_name := '${pub_interface_name}'
+);"
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${drop_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Drop interface node : ${pub_interface_name} on node : ${pub_name}"
+ return_code=0
+else
+  result=$( ${psql_pub_connexion} -c "${drop_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     f_log success ${action_task} "Drop interface node : ${pub_interface_name} on node : ${pub_name}"
+     return_code=0
+    else
+     f_log failed ${action_task}  "Drop interface node : ${pub_interface_name} on node : ${pub_name}"
+     return_code=1
+    fi
+fi
+return ${return_code}
+} # OK
+#############   END INTERFACE  SECTION ###############
+
+
+
+#############   SUBSCRIPTION SECTION ###############
+function f_create_subscription(){
+return_code=0
+result=""
+
+local check_statement="SELECT 'exists' FROM pglogical.subscription WHERE sub_name = '${sub_subscription_name}'"
+
+result=$( ${psql_sub_connexion} -c "${check_statement}" )
+if [ "${result}" != "exists" ]; then
+  local create_statement="SELECT pglogical.create_subscription(
+    subscription_name := '${sub_subscription_name}',
+    replication_sets := '{${pub_replica_set_name}}',
+    provider_dsn := 'hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user} password=${pub_user_passwd}',
+    synchronize_structure := ${sub_to_sync_structure},
+    synchronize_data := ${sub_to_sync_data}
+    );"
+
+  if [ "${isverbose}" == "true" ]; then
+    f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${create_statement}\" "
+  fi
+
+  if [ "${dryrun}" == "true" ];then
+   f_log info  ${action_task} "/* Dryrun */ Create subscription : ${sub_subscription_name} with provider_dsn : hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user} adn replication set : ${pub_replica_set_name} "
+   return_code=0
+  else
+    result=$( ${psql_sub_connexion} -c "${create_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     f_log success ${action_task} "Create subscription : ${sub_subscription_name} with provider_dsn : hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user} adn replication set : ${pub_replica_set_name} "
+    else
+     f_log failed ${action_task}  "Create subscription : ${sub_subscription_name} with provider_dsn : hostaddr=${pub_host} port=${pub_port} dbname=${pub_dbname} user=${pub_user} adn replication set : ${pub_replica_set_name} "
+     ((return_code++))
+    fi
+  fi
+
+  if [ ${return_code} -gt 0 ]; then
+   return  ${return_code}
+  fi
+
+fi
+
+if [ "${activate_sub}" == "true" ]; then
+    local activate_statement="SELECT pglogical.alter_subscription_enable(
+          subscription_name := '${sub_subscription_name}',
+          immediate := true
+          );"
+
+    if [ "${isverbose}" == "true" ]; then
+      f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${activate_statement}\" "
+    fi
+
+    if [ "${dryrun}" == "true" ];then
+     f_log info  ${action_task} "/* Dryrun */ Alter subscription : ${sub_subscription_name} enabled "
+     return_code=0
+    else
+      result=$( ${psql_sub_connexion} -c "${activate_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+      if [ $? -eq 0 ]; then
+       f_log success ${action_task} "Alter subscription : ${sub_subscription_name} enabled "
+      else
+       f_log failed ${action_task}  "Alter subscription : ${sub_subscription_name} enabled "
+       ((return_code++))
+      fi
+    fi
+
+else
+  f_log failed ${action_task} "Create subscription : ${sub_subscription_name} already exists "
+  return_code=1
+
+fi
+
+
+return ${return_code}
+
+} # OK
+
+function f_drop_subscription(){
+
+  return_code=0
+  result=""
+
+  local check_statement="SELECT 'exists' FROM pglogical.subscription WHERE sub_name = '${sub_subscription_name}'"
+
+  result=$( ${psql_sub_connexion} -c "${check_statement}" )
+  if [ "${result}" == "exists" ]; then
+      local deactivate_statement="SELECT pglogical.alter_subscription_disable(
+              subscription_name := '${sub_subscription_name}',
+              immediate := true
+              );"
+
+        if [ "${isverbose}" == "true" ]; then
+          f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${deactivate_statement}\" "
+        fi
+
+        if [ "${dryrun}" == "true" ];then
+         f_log info  ${action_task} "/* Dryrun */ Alter subscription : ${sub_subscription_name} disabled "
+         return_code=0
+        else
+          result=$( ${psql_sub_connexion} -c "${deactivate_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+          if [ $? -eq 0 ]; then
+           f_log success ${action_task} "Alter subscription : ${sub_subscription_name} disabled "
+          else
+           f_log failed ${action_task}  "Alter subscription : ${sub_subscription_name} disabled "
+           ((return_code++))
+          fi
+        fi
+   else
+     f_log failed ${action_task}  "Drop subscription : ${sub_subscription_name} not exists "
+     ((return_code++))
+    fi
+
+
+
+    if [ ${return_code} -gt 0 ]; then
+     return  ${return_code}
+    fi
+
+    local drop_statement="SELECT pglogical.drop_subscription(
+      subscription_name := '${sub_subscription_name}',
+      ifexists := true
+      );"
+
+    if [ "${isverbose}" == "true" ]; then
+      f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${drop_statement}\" "
+    fi
+
+    if [ "${dryrun}" == "true" ];then
+     f_log info  ${action_task} "/* Dryrun */ Drop subscription : ${sub_subscription_name} "
+     return_code=0
+    else
+      result=$( ${psql_sub_connexion} -c "${create_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+      if [ $? -eq 0 ]; then
+       f_log success ${action_task} "Drop subscription : ${sub_subscription_name} "
+      else
+       f_log failed ${action_task}  "Drop subscription : ${sub_subscription_name} "
+       ((return_code++))
+      fi
+  fi
+
+return ${return_code}
+} # OK
+
+function f_display_subscription(){
+
+ case ${concern_item} in
+   all)
+      local monit_statement="SELECT * FROM  pglogical.show_subscription_status('${sub_subscription_name}');"
+      result=$( ${psql_sub_connexion} --field-separator=";" -c "${monit_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+      if [ $? -eq 0 ]; then
+       # f_log success ${action_task} "Display sub : ${sub_subscription_name} informations "
+       echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+       awk -F';' '
+       BEGIN {}
+       {
+       printf "\n Subscription Informations :\n"
+       printf "---------------------\n"
+       printf "\t- %-20s : %s \n","subscription_name",$1
+       printf "\t- %-20s : %s \n","status",$2
+       printf "\t- %-20s : %s \n","provider_node",$3
+       printf "\t- %-20s : %s \n","provider_dsn",$4
+       printf "\t- %-20s : %s \n","slot_name",$5
+       printf "\t- %-20s : %s \n","replication_sets",$6
+       printf "\t- %-20s : %s \n","forward_origins",$6
+       }
+       END {printf "\n" }
+        '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+       return_code=0
+      else
+       f_log failed ${action_task}  "Display sub : ${sub_subscription_name} informations "
+       return_code=1
+      fi
+      ;;
+   *)
+      local monit_statement="SELECT * FROM pglogical.show_subscription_table('${sub_subscription_name}','${pub_schema}.${concern_item}');"
+      result=$( ${psql_sub_connexion} --field-separator=";" -c "${monit_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+      if [ $? -eq 0 ]; then
+       # f_log success ${action_task} "Display specific sub  item : ${sub_subscription_name} ${concern_item} informations "
+        echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+        awk -F';' -v relation="${pub_schema}.${concern_item}" '
+        BEGIN {}
+        {
+        printf "\n Subscription Informations for %s:\n",relation
+        printf "-------------------------------------------\n"
+        printf "\t- %-20s : %s \n","nspname",$1
+        printf "\t- %-20s : %s \n","relname",$2
+        printf "\t- %-20s : %s \n","status",$3
+        }
+        END {printf "\n" }
+         '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+       return_code=0
+      else
+       f_log failed ${action_task}  "Display specific sub  item : ${sub_subscription_name} ${concern_item} informations "
+       return_code=1
+      fi
+      ;;
+    "")
+    local monit_statement="SELECT * FROM pglogical.show_subscription_status('${sub_subscription_name}');"
+    result=$( ${psql_sub_connexion} --field-separator=";" -c "${monit_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err)
+    if [ $? -eq 0 ]; then
+     # f_log success ${action_task} "Display sub : ${sub_subscription_name} informations "
+      echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+      awk -F';' '
+      BEGIN {}
+      {
+      printf "\n Subscription Informations :\n"
+      printf "---------------------\n"
+      printf "\t- %-20s : %s \n","subscription_name",$1
+      printf "\t- %-20s : %s \n","status",$2
+      printf "\t- %-20s : %s \n","provider_node",$3
+      printf "\t- %-20s : %s \n","provider_dsn",$4
+      printf "\t- %-20s : %s \n","slot_name",$5
+      printf "\t- %-20s : %s \n","replication_sets",$6
+      printf "\t- %-20s : %s \n","forward_origins",$6
+      }
+      END {printf "\n" }
+       '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+     return_code=0
+    else
+     f_log failed ${action_task}  "Display sub : ${sub_subscription_name} informations "
+     return_code=1
+    fi
+    ;;
+ esac
+return ${return_code}
+} # OK
+#############  END  SUBSCRIPTION SECTION ###############
+
+
+
+
+#############   REPLICA SET SECTION ###############
+function f_create_replication_set(){
+
+local check_statement="select 'exists' from pglogical.replication_set WHERE set_name = '${pub_replica_set_name}'"
+
+result=$( ${psql_pub_connexion} -c "${check_statement}" )
+if [ "${result}" != "exists" ]; then
+  local create_statement="SELECT pglogical.create_replication_set('${pub_replica_set_name}');"
+  if [ "${isverbose}" == "true" ]; then
+    f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${create_statement}\" "
+  fi
+  if [ "${dryrun}" == "true" ];then
+   f_log info  ${action_task} "/* Dryrun */ Create replication set ${pub_replica_set_name} with array ${pub_schema} on node : ${pub_name}"
+   return_code=0
+  else
+      result=$( ${psql_pub_connexion} -c "${create_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+      if [ $? -eq 0 ]; then
+       f_log success ${action_task} "Create replication set ${pub_replica_set_name} on node : ${pub_name}"
+       return_code=0
+      else
+       f_log failed ${action_task}  "Create replication set ${pub_replica_set_name} on node : ${pub_name}"
+       return_code=1
+      fi
+  fi
+fi
+return ${return_code}
+} # OK
+
+function f_drop_replication_set(){
+# pglogical.drop_replication_set(set_name text)
+local drop_statement="SELECT pglogical.drop_replication_set('${pub_replica_set_name}');"
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${drop_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Drop replication set ${pub_replica_set_name} on node ${pub_name}"
+ return_code=0
+else
+result=$( ${psql_pub_connexion} -c "${drop_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+if [ $? -eq 0 ]; then
+ f_log success ${action_task} "Drop replication set ${pub_replica_set_name} on node ${pub_name}"
+ return_code=0
+else
+ f_log failed ${action_task}  "Drop replication set ${pub_replica_set_name} on node ${pub_name}"
+ return_code=1
+fi
+fi
+return ${return_code}
+} # OK
+
+function f_display_replication_set() {
+
+local monit_statement[0]="SELECT * from pglogical.replication_set WHERE set_name = '${pub_replica_set_name}'"
+local monit_statement[1]="SELECT * FROM pglogical.replication_set_table t JOIN pglogical.replication_set r ON r.set_id = t.set_id WHERE r.set_name = '${pub_replica_set_name}'"
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${monit_statement[0]}\" "
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${monit_statement[1]}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */  Display replication set  : ${pub_replica_set_name} informations "
+ return_code=0
+else
+    result[0]=$( ${psql_pub_connexion} --field-separator=";"  -c "${monit_statement[0]}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    result[1]=$( ${psql_pub_connexion} --field-separator=";"  -c "${monit_statement[1]}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+
+     echo "${result[0]}" > ${tmp_dir}/${action_task}.$$_0.tmp
+     echo "${result[1]}" > ${tmp_dir}/${action_task}.$$_1.tmp
+     awk -F';' '
+     BEGIN {
+       printf "\n Replication Set Informations :\n"
+       printf " --------------------------------\n"
+     }
+     {
+     printf "\t- %-20s : %s \n","set_id",$1
+     printf "\t- %-20s : %s \n","set_nodeid",$2
+     printf "\t- %-20s : %s \n","set_name",$3
+     printf "\t- %-20s : %s \n","replicate_insert",$4
+     printf "\t- %-20s : %s \n","replicate_update",$5
+     printf "\t- %-20s : %s \n","replicate_delete",$6
+     printf "\t- %-20s : %s \n","replicate_truncate",$7
+     }
+     END { printf "\n" }
+      '  ${tmp_dir}/${action_task}.$$_0.tmp && rm ${tmp_dir}/${action_task}.$$_0.tmp
+
+     awk -F';' '
+      BEGIN {
+      printf "\n Replication Set Tables  Informations :\n"
+      printf " ----------------------------------------\n" ;
+      printf "%-20s\t%-20s\t%-20s\t%-20s\n","set_id","set_reloid","set_att_list","set_row_filter"
+      }
+      {
+      printf "%-20s\t%-20s\t%-20s\t%-20s\n",$1,$2,$3,$4
+      }
+      END { printf "\n" }
+       '  ${tmp_dir}/${action_task}.$$_1.tmp && rm ${tmp_dir}/${action_task}.$$_1.tmp
+     return_code=0
+    else
+     f_log failed ${action_task}  "Display replication set  : ${pub_replica_set_name} informations "
+     return_code=1
+    fi
+
+fi
+return ${return_code}
+} # OK
+
+#############  END  REPLICA SET SECTION ###############
+# Manage items in replication :
+
+#############   ITEM SECTION  ###############
+
+function f_add_all_items(){
+  # pglogical.replication_set_add_all_tables(set_name name, schema_names text[], synchronize_data boolean) Adds all tables in given schemas.
+  # Only existing tables are added, table that will be created in future will not be added automatically.
+  # For how to ensure that tables created in future are added to correct replication set, see section Automatic Assignment of Replication Sets for New Tables.Parameters:
+  # set_name – name of the existing replication set
+  # schema_names – array of names of existing schemas from which tables should be added
+  # synchronize_data – if true, the table data is synchronized on all subscribers which are subscribed to given replication set, default false
+  local add_all_items_statement="SELECT pglogical.replication_set_add_all_tables('${pub_replica_set_name}', ARRAY['${pub_schema}'],${pub_to_sync_item});"
+  if [ "${isverbose}" == "true" ]; then
+    f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${add_all_items_statement}\" "
+  fi
+
+  if [ "${dryrun}" == "true" ];then
+   f_log info  ${action_task} "/* Dryrun */ Add all tables from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=0
+  else
+  result=$( ${psql_pub_connexion} -c "${add_all_items}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+   f_log success ${action_task} "Add all tables from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=0
+  else
+   f_log failed ${action_task}  "Add all tables from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=1
+  fi
+fi
+  return ${return_code}
+} # OK
+
+function f_add_item(){
+
+# START :  pglogical.alter_subscription_resynchronize_table
+
+local add_an_item_statement="SELECT pglogical.replication_set_add_table(
+ set_name := '${pub_replica_set_name}',
+ relation := '${concern_item}',
+ synchronize_data := ${pub_to_sync_item} );"
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${add_an_item_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Add table ${concern_item} from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+ return_code=0
+else
+  result=$( ${psql_pub_connexion} -c "${add_an_item_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+   f_log success ${action_task} "Add table ${concern_item} from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=0
+  else
+   f_log failed ${action_task}  "Add table ${concern_item} from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=1
+  fi
+fi
+  return ${return_code}
+} # OK
+
+function f_drop_item(){
+# param : category : feed channel autre
+# le predicat : feed_id , channel id ou autre cf dbadmin
+#  pglogical.replication_set_remove_table(set_name name, relation regclass) Remove a table from replication set.Parameters:
+# set_name – name of the existing replication set
+# relation – name or OID of the table to be removed from the set
+local drop_an_item_statement="SELECT pglogical.replication_set_remove_table('${pub_replica_set_name}','${concern_item}');"
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${drop_an_item_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Drop table ${concern_item} from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+ return_code=0
+else
+  result=$( ${psql_pub_connexion} -c "${add_an_item}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+   f_log success ${action_task} "Drop table ${concern_item} from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=0
+  else
+   f_log failed ${action_task}  "Drop table ${concern_item} from ${pub_schema} in replication set ${pub_replica_set_name} on node : ${pub_name}"
+   return_code=1
+  fi
+  return ${return_code}
+fi
+} # OK
+
+
+function f_resync_item(){
+# START :  pglogical.alter_subscription_resynchronize_table
+
+if [ -z "${concern_item}" ]; then
+ f_log failed ${action_task} "An item must be specified"
+ exit 2
+fi
+
+local resync_statement="SELECT pglogical.alter_subscription_resynchronize_table('${sub_subscription_name}','${concern_item}',${sub_to_sync_data}) "
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${resync_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Resynchronise specified item  : ${pub_schema}.${concern_item} from ${sub_subscription_name} "
+ return_code=0
+else
+    result=$( ${psql_sub_connexion}  -c "${resync_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     f_log success ${action_task} "Resynchronise specified item  : ${pub_schema}.${concern_item} from ${sub_subscription_name} "
+     return_code=0
+    else
+     f_log failed ${action_task}  "Resynchronise specified item  : ${pub_schema}.${concern_item} from ${sub_subscription_name} "
+     return_code=1
+    fi
+fi
+return ${return_code}
+} # OK
+
+
+function f_display_all_item_sync(){
+ # select pglogical.show_repset_table_info('test.test_tbl','{test_replica_set}');
+
+if [ "${concern_item}" == "all" ]; then
+  local monit_all_statement="select 'select * from pglogical.show_subscription_table(subscription_name := '||quote_literal(s.sub_name)||',relation := '||quote_literal(r.sync_nspname||'.'||sync_relname)||')' from pglogical.subscription s join pglogical.local_sync_status r  on s.sub_id = r.sync_subid where r.sync_nspname is not null and r.sync_relname is not null ;"
+else
+  f_log failed ${action_task} "An  item must be specified : schema.relation or all "
+  exit 2
+fi
+
+if [ "${isverbose}" == "true" ]; then
+   f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${monit_all_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Display specified item  : ${concern_item} from  ${sub_subscription_name} "
+ return_code=0
+else
+     ${psql_sub_connexion} -c "${monit_all_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err | while read stmt
+     do
+         ${psql_sub_connexion} --field-separator=";"  -c "${stmt}" >> ${tmp_dir}/sync.$$ 2>> ${log_directory}/${tool}_${mainjobdate}.err
+     done
+     if [ -f ${tmp_dir}/sync.$$ ]; then
+     awk -F';' '
+     BEGIN {
+         printf "\n Table Sync Informations :\n"
+         printf " ------------------------------------------\n"
+         printf "%-20s%-50s%-20s\n","schema","table","status"
+       }
+     {
+         printf "%-20s%-50s%-20s\n",$1,$2,$3 ;
+     }
+     END {printf "\n" }
+      '  ${tmp_dir}/sync.$$ && rm ${tmp_dir}/sync.$$
+     return_code=0
+    else
+     f_log failed ${action_task}  "Display specified item  :${pub_schema}.${concern_item} from  ${pub_replica_set_name} "
+     return_code=1
+    fi
+
+fi
+  return ${return_code}
+} # OK
+
+function f_display_item_sync(){
+ # select pglogical.show_repset_table_info('test.test_tbl','{test_replica_set}');
+
+if  [ "${concern_item}" != "" ]; then
+  local monit_statement="select * from pglogical.show_subscription_table(subscription_name := '${sub_subscription_name}',relation := '${concern_item}')"
+else
+  f_log failed ${action_task} "An  item must be specified : schema.relation or all "
+  exit 2
+fi
+
+if [ "${isverbose}" == "true" ]; then
+   f_log debug ${action_task} "Running : ${psql_sub_connexion} -c \"${monit_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Display specified item  : ${concern_item} from  ${sub_subscription_name} "
+ return_code=0
+else
+    result=$( ${psql_sub_connexion} --field-separator=";"  -c "${monit_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+
+
+     echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+     awk -F';' '
+     BEGIN {
+         printf "\n Table Sync Informations :\n"
+         printf " ------------------------------------------\n"
+         printf "%-20s%-50s%-20s\n","schema","table","status"
+       }
+     {
+         printf "%-20s%-50s%-20s\n",$1,$2,$3 ;
+     }
+     END {printf "\n" }
+      '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+     return_code=0
+    else
+     f_log failed ${action_task}  "Display specified item  :${pub_schema}.${concern_item} from  ${pub_replica_set_name} "
+     return_code=1
+    fi
+
+fi
+  return ${return_code}
+}
+
+function f_display_item_info(){
+ # select pglogical.show_repset_table_info('test.test_tbl','{test_replica_set}');
+
+if [ "${concern_item}" == "all" ]; then
+ f_log failed ${action_task} "An  item must be specified : schema.relation "
+ exit 2
+fi
+
+local monit_statement="SELECT * FROM pglogical.show_repset_table_info('${concern_item}','{${pub_replica_set_name}}') "
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${psql_pub_connexion} -c \"${monit_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */ Display specified item  : ${pub_schema}.${concern_item} from  ${pub_replica_set_name} "
+ return_code=0
+else
+    result=$( ${psql_pub_connexion} --field-separator=";"  -c "${monit_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     #  f_log success ${action_task} "Display node : ${node_name} informations "
+     echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+     awk -F';' '
+     BEGIN {}
+     {
+     printf "\n Table in Replication set Informations :\n"
+     printf " ------------------------------------------\n"
+     printf "\t- %-20s : %s \n","relid",$1
+     printf "\t- %-20s : %s \n","nspname",$2
+     printf "\t- %-20s : %s \n","relname",$3
+     printf "\t- %-20s : %s \n","att_list",$4
+     printf "\t- %-20s : %s \n","has_row_filter",$5
+     }
+     END {printf "\n" }
+      '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+     return_code=0
+    else
+     f_log failed ${action_task}  "Display specified item  :${pub_schema}.${concern_item} from  ${pub_replica_set_name} "
+     return_code=1
+    fi
+
+fi
+  return ${return_code}
+} # OK
+
+#############  END ITEM SECTION  ###############
+
+
+function f_check_logical_parameter(){
+  local psql_connexion
+  local check_statement="select name,case when char_length(setting) >= 20 THEN substr(setting,0,17)||'...' ELSE setting END ,
+   CASE WHEN name = 'wal_level' THEN
+     CASE WHEN setting != 'logical' THEN ' Must be at logical ' ELSE 'OK' END
+   WHEN name = 'max_worker_processes' THEN
+     CASE WHEN setting::integer < 10 THEN 'KO : Upgrade max_worker_processes at least to 10 ' ELSE 'OK' END
+   WHEN name = 'max_replication_slots' THEN
+     CASE WHEN setting::integer < 10 THEN 'KO : Upgrade max_replication_slots at least to 10 ' ELSE 'OK' END
+   WHEN name = 'max_wal_senders' THEN
+     CASE WHEN setting::integer < 10 THEN 'KO : Upgrade max_wal_senders at least to 10 ' ELSE 'OK' END
+   WHEN name = 'shared_preload_libraries' THEN
+     CASE WHEN setting not like '%pglogical%' THEN 'KO : Add pglogical in shared_preload_libraries' ELSE 'OK' END
+  END  as commentary
+    FROM pg_settings WHERE name in ('wal_level','max_worker_processes','max_replication_slots','max_wal_senders','shared_preload_libraries')"
+
+  case ${1} in
+    provider)
+    psql_connexion="${psql_pub_connexion}"
+    ;;
+    subscriber)
+    psql_connexion="${psql_sub_connexion}"
+    ;;
+  esac
+
+  result=$( ${psql_connexion} --field-separator=";"  -c "${check_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+    echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+    awk -F';' -v item=${1} -v module_name=${module_name} '
+     BEGIN {
+      printf "\n Module : %s\n",module_name
+      printf "\n pglogical Requierments check-up : %s \n",item
+      printf " -------------------------------------------\n"
+     printf "%-30s\t%-20s\t%-60s\n","parameter","value","commentary"
+    }
+    {
+     printf "%-30s\t%-20s\t%-60s\n",$1,$2,$3
+    }
+    END {printf "\n" }
+     '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+  return_code=0
+  else
+  return_code=1
+  fi
+
+  return ${return_code}
+
+} # OK
