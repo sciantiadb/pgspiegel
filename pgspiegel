@@ -1,0 +1,945 @@
+#!/bin/bash
+#
+# ------------------------------------------------------------------------------
+#  Copyright (c) 2022, Guillaume ARMEDE & SciantiaDB
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+#  1. Redistributions of source code must retain the above copyright
+#     notice, this list of conditions and the following disclaimer.
+#  2. Redistributions in binary form must reproduce the above copyright
+#     notice, this list of conditions and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHORS ''AS IS'' AND ANY EXPRESS OR
+# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+# OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+# INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# ------------------------------------------------------------------------------
+#
+# ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Variables Read Only
+# ------------------------------------------------------------------------------
+
+readonly tool="pgspiegel"
+readonly tools_dir="/home/lengow/tools"
+readonly cfg_dir="${tools_dir}/conf"
+readonly log_directory="${tools_dir}/log"
+readonly lib_dir="${tools_dir}/lib"
+readonly tmp_dir="/tmp/${tool}"
+readonly last_available_version="140000"
+readonly min_supported_version="90610"
+readonly mainjobdate=$(date "+%F")
+readonly read_mainjobdate=$(date +"%FT%X")
+
+
+
+readonly author="Guillaume Armède"
+readonly contact="guillaume.armede@lengow.com"
+readonly copyright="SciantiaDB"
+readonly version="1.0"
+readonly devdate="2022-01-19"
+
+
+# ------------------------------------------------------------------------------
+# Variables Defaults
+# ------------------------------------------------------------------------------
+is_colored=false
+
+# Configuration Variables defaults :
+pub_port=5432
+pub_host="127.0.0.1"
+pub_dbname="postgres"
+pub_user="pglogical"
+pub_name="provider1"
+pub_interface_name="default"
+
+sub_port=5432
+sub_host="127.0.0.1"
+sub_dbname="postgres"
+sub_user="pglogical"
+sub_name="subscription1"
+sub_subscription_name="sub_test_from_default"
+
+pub_schema="public"
+pub_replica_set_name="default_replica_set"
+
+pub_to_sync_replication_set=true
+pub_to_sync_item=true
+pub_to_sync_replication_set=true
+sub_to_sync_structure=false
+sub_to_sync_data=true
+
+# Tools Variables defaults :
+concern_item="all"
+create_flag=false
+drop_flag=false
+monit_flag=false
+activate_sub=false
+resync_flag=false
+module_name="native"
+method_name="ondisk"
+
+result=""
+# ------------------------------------------------------------------------------
+#  Functions
+# ------------------------------------------------------------------------------
+
+# Script Functions :
+# ------------------
+
+function f_usage() {
+
+case ${module_name} in
+ pglogical)
+echo "
+ $(basename $0) ${version} - Usage command
+-----------------------------
+
+Usage : $(basename $0)  GENERAL_OPTIONS  TASKS_OPTIONS ...
+
+
+o General options:
+
+   --conf    TEXT         All options availables for the replicaiton [ must be in ${cfg_dir} ]
+   --module  TEXT         Specify module name :  pglogical | native
+   --verbose              Active verbose mode
+   --dryrun               Launch task wihout execute
+
+
+o Create options :
+
+  --create   TEXT         Create spefic element : node | subscription | interface | relation
+  --item     TEXT         Sub object creation  : provider | subscriber | all | schema.relation
+  --activate              Activate subscription
+
+- For Provider node :
+    \$ >  $(basename $0) --conf myconf.conf --create node --item provider
+- For Provider Interface :
+    \$ >  $(basename $0) --conf myconf.conf --create interface --item provider
+- For Replication Set  :
+    \$ >  $(basename $0) --conf myconf.conf --create rep-set
+- Add all relations from the pub_schema to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --create relation --item all
+- Add speficic relation to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --create relation --item schema.relation
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --create node --item subscriber
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --create subscription --activate
+
+o Drop options :
+
+  --drop     TEXT
+  --item     TEXT
+
+- For Provider node :
+    \$ >  $(basename $0) --conf myconf.conf --drop node --item provider
+- For Replication Set  :
+    \$ >  $(basename $0) --conf myconf.conf --drop rep-set
+- Add all relations from the pub_schema to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --drop relation --item all
+- Add speficic relation to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --drop relation --item schema.relation
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --drop node --item subscriber
+- For Subscription node :
+    \$ >  $(basename $0) --conf myconf.conf --drop subscription
+
+o Monit options :
+
+  --monit    TEXT
+  --item     TEXT
+
+- For Provider node :
+    \$ >  $(basename $0) --conf myconf.conf --monit node --item provider
+- For Replication Set  :
+    \$ >  $(basename $0) --conf myconf.conf --monit rep-set
+- Add all relations from the pub_schema to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --monit relation --item all
+- Add speficic relation to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --monit relation --item schema.relation
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --monit node --item subscriber
+- For Subscription node :
+    \$ >  $(basename $0) --conf myconf.conf --monit subscription
+"
+;;
+native)
+
+echo "
+
+ $(basename $0) ${version} - Usage command
+-----------------------------
+
+Usage : $(basename $0)  GENERAL_OPTIONS  TASKS_OPTIONS ...
+
+
+o General options:
+
+   --conf    TEXT         All options availables for the replicaiton [ must be in ${cfg_dir} ]
+   --module  TEXT         Specify module name :  pglogical | native
+   --verbose              Active verbose mode
+   --dryrun               Launch task wihout execute
+
+
+o Create options :
+
+  --create   TEXT         Create spefic element : node | subscription | interface | relation
+  --item     TEXT         Sub object creation  : provider | subscriber | all | schema.relation
+  --activate              Activate subscription
+
+- For Provider node :
+    \$ >  $(basename $0) --conf myconf.conf --create node --item provider
+- For Provider Interface :
+    \$ >  $(basename $0) --conf myconf.conf --create interface --item provider
+- For Replication Set  :
+    \$ >  $(basename $0) --conf myconf.conf --create rep-set
+- Add all relations from the pub_schema to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --create relation --item all
+- Add speficic relation to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --create relation --item schema.relation
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --create node --item subscriber
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --create subscription --activate
+
+o Drop options :
+
+  --drop     TEXT
+  --item     TEXT
+
+- For Provider node :
+    \$ >  $(basename $0) --conf myconf.conf --drop node --item provider
+- For Replication Set  :
+    \$ >  $(basename $0) --conf myconf.conf --drop rep-set
+- Add all relations from the pub_schema to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --drop relation --item all
+- Add speficic relation to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --drop relation --item schema.relation
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --drop node --item subscriber
+- For Subscription node :
+    \$ >  $(basename $0) --conf myconf.conf --drop subscription
+
+o Monit options :
+
+  --monit    TEXT
+  --item     TEXT
+
+- For Provider node :
+    \$ >  $(basename $0) --conf myconf.conf --monit node --item provider
+- For Replication Set  :
+    \$ >  $(basename $0) --conf myconf.conf --monit rep-set
+- Add all relations from the pub_schema to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --monit relation --item all
+- Add speficic relation to replication set  :
+    \$ >  $(basename $0) --conf myconf.conf --monit relation --item schema.relation
+- For Subscriber node :
+    \$ >  $(basename $0) --conf myconf.conf --monit node --item subscriber
+- For Subscription node :
+    \$ >  $(basename $0) --conf myconf.conf --monit subscription
+"
+;;
+esac
+exit 0
+} # IN PROGRESS
+
+function f_requirements(){
+
+
+if [ ! -d "${tmp_dir}" ]; then
+  mkdir -p "${tmp_dir}"
+  if [ $? -ne 0 ]; then
+    f_log failed "${tool}" "Failed to create ${tmp_dir}"
+    exit 0
+  fi
+fi
+
+} # OK
+
+function f_check_lock(){
+
+if [ -f "${tmp_dir}/${action_task}.lock" ]; then
+   PID=$(cat "${tmp_dir}/${action_task}.lock" 2> /dev/null )
+   f_log failed "${action_task}" "A job ${action_task} is already running with PID : ${PID} ..."
+   exit 2
+fi
+echo $$ > "${tmp_dir}/${action_task}.lock"
+
+} # OK
+
+function f_log(){
+
+if [ "${is_colored}" == "true" ]; then
+
+local  color_green="\e[32m"
+local  color_red="\e[31m"
+local  color_cyan="\e[36m"
+local  color_yellow="\e[33m"
+local  color_magenta="\e[35m"
+local  color_normal="\e[39m"
+
+fi
+local trace="${1}"
+shift
+local object="${1}"
+shift
+local messages="${*}"
+local datelong=$(date "+%F %T")
+local dateshort=$(date "+%F")
+
+case ${trace} in
+	"info")
+	trace=" INFO    "
+  COLOR=${color_cyan}
+	;;
+	"debug")
+	trace=" DEBUG   "
+  COLOR=${color_magenta}
+	;;
+	"warning")
+	trace=" WARNING "
+  COLOR=${color_yellow}
+	;;
+	"success")
+	trace=" SUCCESS "
+  COLOR=${color_green}
+	;;
+	"failed")
+	trace=" FAILED  "
+  COLOR=${color_red}
+	;;
+  "fatal")
+	trace=" FATAL   "
+  COLOR=${color_red}
+	;;
+esac
+
+[ -d "${log_directory}" ] || mkdir -p ${log_directory}
+echo -e "[${datelong}] [${COLOR}${trace}${color_normal}] [ ${object} ] ${messages}"
+echo "[${datelong}] [${trace}] [ ${object} ] ${messages}" >> ${log_directory}/${tool}_${dateshort}.log
+
+} # OK
+
+function f_canceled(){
+
+  if [ "${create_flag}" == "true" ]; then
+   job="creating ${create_object} "
+  fi
+
+  if [ "${drop_flag}" == "true" ]; then
+   job="dropping ${drop_object} "
+  fi
+
+
+
+f_log fatal "${action_task}" "Tasks canceled while ${job} ... "
+
+
+exit 2
+} # OK
+
+
+# dbAdmin  functions :
+# --------------------
+
+function f_add_shard(){
+
+local add_shard_statement=" select dbaas.add_shard( domain => '${domain_name}', ${domain_predicat} => ${domain_value_predicat} ${shard_options} )"
+
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${dbaas_connection} -c \"${add_shard_statement}\" "
+fi
+
+if [ "${dryrun}" == "true" ];then
+ f_log info  ${action_task} "/* Dryrun */  Add shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name} "
+  return_code=0
+else
+  result=$( ${dbaas_connection} -c "${add_shard_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+   f_log success ${action_task} "Add shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name}"
+   return_code=0
+  else
+   f_log failed ${action_task}  "Add shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name}"
+   return_code=1
+  fi
+fi
+  return ${return_code}
+
+} # wip
+
+function f_alter_shard(){
+  local alter_shard_statement=" select dbaas.alter_shard( domain => '${domain_name}', srv_name => '${srv_name}', ${domain_predicat} => ${domain_value_predicat} ${shard_options} )"
+
+  if [ "${isverbose}" == "true" ]; then
+    f_log debug ${action_task} "Running : ${dbaas_connection} -c \"${alter_shard_statement}\" "
+  fi
+
+  if [ "${dryrun}" == "true" ];then
+   f_log info  ${action_task} "/* Dryrun */  Alter shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name} "
+    return_code=0
+  else
+    result=$( ${dbaas_connection} -c "${alter_shard_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+     f_log success ${action_task} "Alter shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name}"
+     return_code=0
+    else
+     f_log failed ${action_task}  "Alter shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name}"
+     return_code=1
+    fi
+  fi
+    return ${return_code}
+} # to do
+
+# function f_drop_entry(){
+#   echo wip
+# } # to do
+
+function f_get_active_shard(){
+  local get_shard_statement=" select dbaas.get_active_shard( domain => '${domain_name}', ${domain_predicat} => ${domain_value_predicat} ${shard_options} )"
+
+  if [ "${isverbose}" == "true" ]; then
+    f_log debug ${action_task} "Running : ${dbaas_connection} -c \"${get_shard_statement}\" "
+  fi
+
+    result=$( ${dbaas_connection} -qtA -c "${get_shard_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+    if [ $? -eq 0 ]; then
+      echo ${result} | jq '.'
+     return_code=0
+    else
+     f_log failed ${action_task}  "Get active shard : ${domain_predicat} ${domain_value_predicat}  in domain ${domain_name}"
+     return_code=1
+    fi
+return ${return_code}
+} # wip
+
+
+function f_test_connection(){
+
+local dsn
+local connection_statement="select now()"
+
+case ${1} in
+  provider)
+  dsn="${psql_pub_connexion}"
+  ;;
+  subscriber)
+  dsn="${psql_sub_connexion}"
+  ;;
+  dbaas)
+  dsn="${dbaas_connection}"
+  ;;
+esac
+if [ "${isverbose}" == "true" ]; then
+  f_log debug ${action_task} "Running : ${dsn} -c \"${connection_statement}\"  "
+fi
+result=$( ${dsn} -c "${connection_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+if [ $? -eq 0 ]; then
+return_code=0
+else
+return_code=1
+fi
+
+return ${return_code}
+
+} # OK
+
+function f_check_logical_parameter(){
+  local dsn
+  local check_statement="select name,case when char_length(setting) >= 20 THEN substr(setting,0,17)||'...' ELSE setting END ,
+   CASE WHEN name = 'wal_level' THEN
+     CASE WHEN setting != 'logical' THEN ' Must be at logical ' ELSE 'OK' END
+   WHEN name = 'max_worker_processes' THEN
+     CASE WHEN setting::integer < 10 THEN 'KO : Upgrade max_worker_processes at least to 10 ' ELSE 'OK' END
+   WHEN name = 'max_replication_slots' THEN
+     CASE WHEN setting::integer < 10 THEN 'KO : Upgrade max_replication_slots at least to 10 ' ELSE 'OK' END
+   WHEN name = 'max_wal_senders' THEN
+     CASE WHEN setting::integer < 10 THEN 'KO : Upgrade max_wal_senders at least to 10 ' ELSE 'OK' END
+   WHEN name = 'shared_preload_libraries' THEN
+     CASE WHEN setting not like '%pglogical%' THEN 'KO : Add pglogical in shared_preload_libraries' ELSE 'OK' END
+  END  as commentary
+    FROM pg_settings WHERE name in ('wal_level','max_worker_processes','max_replication_slots','max_wal_senders','shared_preload_libraries')"
+
+  case ${1} in
+    provider)
+    dsn="${psql_pub_connexion}"
+    ;;
+    subscriber)
+    dsn="${psql_sub_connexion}"
+    ;;
+  esac
+
+  result=$( ${dsn}  --field-separator=";"  -c "${check_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
+  if [ $? -eq 0 ]; then
+    echo "${result}" > ${tmp_dir}/${action_task}.$$.tmp
+    awk -F';' -v item=${1} '
+    BEGIN {
+      printf "\n pglogical Requiermenets check-up : %s \n",item
+      printf "-------------------------------------\n"
+     printf "%-30s\t%-20s\t%-60s\n","parameter","value","commentary"
+    }
+    {
+     printf "%-30s\t%-20s\t%-60s\n",$1,$2,$3
+    }
+    END {printf "\n" }
+     '  ${tmp_dir}/${action_task}.$$.tmp && rm ${tmp_dir}/${action_task}.$$.tmp
+  return_code=0
+  else
+  return_code=1
+  fi
+
+  return ${return_code}
+
+} # OK
+
+
+
+# Main function :
+# ---------------
+
+function f_main(){
+
+#
+# Loading configuration
+#
+
+if [ ! -f "${cfg_dir}/${config_file}" ]; then
+f_log failed ${action_task} " File : ${cfg_dir}/${config_file} is missing "
+exit 2
+fi
+
+source ${cfg_dir}/${config_file}
+psql_pub_connexion="psql --no-psqlrc --quiet --tuples-only  --no-align --port=${pub_port} --host=${pub_host} --username=${pub_user} --dbname=${pub_dbname}"
+psql_sub_connexion="psql --no-psqlrc --quiet --tuples-only  --no-align --port=${sub_port} --host=${sub_host} --username=${sub_user} --dbname=${sub_dbname}"
+
+dbaas_connection="psql --no-psqlrc --quiet --tuples-only  --no-align --port=${dbaas_port} --host=${dbaas_host} --username=${dbaas_user} --dbname=${dbaas_dbname}"
+
+#
+# Testing connexion , if KO exiting program
+#
+
+
+# connections=( "provider" "subscriber" "dbaas")
+connections=( "provider" "subscriber")
+for conn in ${connections[@]}
+do
+ if ! f_test_connection "${conn}" ; then
+ # f_log success ${tool} "Connexion to ${conn} : OK"
+ # else
+ f_log failed  ${tool} "Connexion to ${conn} : KO"
+ return_code=1
+ fi
+done
+
+if [ "${return_code}" -gt 0 ]; then
+ return ${return_code}
+fi
+#
+#  Load modules :
+#
+
+case ${module_name} in
+pglogical)
+  if [ -f "${lib_dir}/pglogical.lib" ]; then
+    source ${lib_dir}/pglogical.lib
+  else
+    f_log failed ${action_task} "Lib : ${lib_dir}/pglogical.lib is missing "
+    exit 2
+  fi
+  ;;
+native)
+  if [ -f "${lib_dir}/native.lib" ]; then
+    source ${lib_dir}/native.lib
+  else
+    f_log failed ${action_task} "Lib : ${lib_dir}/native.lib is missing "
+    exit 2
+  fi
+;;
+*)
+  f_log failed ${action_task} " Module ${module_name} is unknow . Available : pglogical | native  "
+;;
+esac
+
+if [ "${to_check}" == "true" ]; then
+  connections=( "provider" "subscriber" )
+  for conn in ${connections[@]}
+  do
+    if ! f_check_logical_parameter ${conn}; then
+    f_log failed ${tool} "Check for ${conn} : KO"
+    fi
+  done
+  exit 0
+fi
+
+
+#
+# Overwritting parameters section :
+#
+
+
+#
+
+# --------------------
+#
+# Checking which task is to do
+#
+if [ "${create_flag}" == "true" ]; then
+  f_check_lock
+   case ${create_object} in
+   node)
+     if f_create_replicate_node; then
+       f_log success ${action_task} " - End of program - "
+     else
+       f_log failed ${action_task} " - End of program - "
+     fi
+     ;;
+   publication)
+     if f_create_replicate_node; then
+       f_log success ${action_task} " - End of program - "
+     else
+       f_log failed ${action_task} " - End of program - "
+     fi
+     ;;
+   rep-set)
+     if f_create_replication_set; then
+       f_log success ${action_task} " - End of program - "
+     else
+       f_log failed ${action_task} " - End of program - "
+     fi
+     ;;
+   interface)
+     if f_create_interface_on_node; then
+       f_log success ${action_task} " - End of program - "
+     else
+       f_log failed ${action_task} " - End of program - "
+     fi
+     ;;
+   subscription)
+     if f_create_subscription; then
+       f_log success ${action_task} " - End of program - "
+     else
+       f_log failed ${action_task} " - End of program - "
+     fi
+     ;;
+   relation)
+     case ${concern_item} in
+     all)
+         if f_add_all_items; then
+           f_log success ${action_task} " - End of program - "
+         else
+           f_log failed ${action_task} " - End of program - "
+         fi
+      ;;
+      *)
+         if f_add_item; then
+           f_log success ${action_task} " - End of program - "
+         else
+           f_log failed ${action_task} " - End of program - "
+          fi
+      ;;
+      esac
+    ;;
+   structure)
+      if f_crate_strucutre_on_subscriber; then
+        f_log success ${action_task} " - End of program - "
+      else
+        f_log failed ${action_task} " - End of program - "
+      fi
+      ;;
+   *)
+    echo "Create option ${create_object} is unknow . Available : node rep-set interface subscription relation structure " ;;
+   esac
+fi
+
+if [ "${monit_flag}" == "true" ]; then
+   case ${monit_object} in
+   node)
+     if f_display_replication_node ; then
+     f_log success ${action_task} " - End of program - "
+     else
+     f_log failed ${action_task} " - End of program - "
+     fi
+   ;;
+   publication)
+     if f_display_replication_node ; then
+     f_log success ${action_task} " - End of program - "
+     else
+     f_log failed ${action_task} " - End of program - "
+     fi
+   ;;
+   rep-set)
+     if f_display_replication_set; then
+     f_log success ${action_task} " - End of program - "
+     else
+     f_log failed ${action_task} " - End of program - "
+     fi
+     ;;
+   interface)
+   if f_display_interface; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi
+   ;;
+    subscription)
+     if f_display_subscription; then
+     f_log success ${action_task} " - End of program - "
+     else
+     f_log failed ${action_task} " - End of program - "
+     fi
+      ;;
+   relation)
+     if f_display_item_info ; then
+     f_log success ${action_task} " - End of program - "
+     else
+     f_log failed ${action_task} " - End of program - "
+     fi ;;
+   rep-state)
+     case ${concern_item} in
+       all)
+        if ! f_display_all_item_sync; then
+        f_log failed ${action_task} " - End of program - "
+        fi ;;
+        *)
+        if ! f_display_item_sync; then
+        f_log failed ${action_task} " - End of program - "
+        fi ;;
+      esac
+    ;;
+   shard)
+   if f_get_active_shard ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   *)
+      echo "monit option ${monit_object} is unknow . Available : node rep-set interface subscription relation rep-state " ;;
+   esac
+fi
+
+if [ "${drop_flag}" == "true" ]; then
+  f_check_lock
+   case ${drop_object} in
+   node)
+   if f_drop_replication_node ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   publication)
+   if f_drop_replication_node ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   rep-set)
+   if f_drop_replication_set ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   interface)
+   if f_drop_interface_on_node ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   subscription)
+   if f_drop_subscription ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   relation)
+   if f_drop_item ; then
+   f_log success ${action_task} " - End of program - "
+   else
+   f_log failed ${action_task} " - End of program - "
+   fi ;;
+   *)
+      echo "Drop option ${create_object} is unknow . Available : node publication rep-set interface subscription relation " ;;
+   esac
+fi
+
+if [ "${resync_flag}" == "true" ]; then
+  if f_resync_item; then
+  f_log success ${action_task} " - End of program - "
+  else
+  f_log failed ${action_task} " - End of program - "
+  fi
+fi
+
+
+if [ "${add_shard_flag}" == "true" ]; then
+  if f_add_shard; then
+  f_log success ${action_task} " - End of program - "
+  else
+  f_log failed ${action_task} " - End of program - "
+  fi
+fi
+
+if [ "${alter_shard_flag}" == "true" ]; then
+  if f_alter_shard; then
+  f_log success ${action_task} " - End of program - "
+  else
+  f_log failed ${action_task} " - End of program - "
+  fi
+fi
+
+
+} # OK
+
+# ------------------------------------------------------------------------------
+#  Main Program
+# ------------------------------------------------------------------------------
+
+
+trap f_canceled SIGINT SIGABRT SIGKILL
+
+# Load global parameters
+# ---------------------
+# -o hd:vr:t:m:c:gb:rM:V:B:RD:T:qs:fC:i:u:k:j:n:L:w:lK
+GET_OPT=$(getopt -o '' --long help,dryrun,color,conf:,create:,drop:,resync,item:,verbose,monit:,activate,check,module:,method:,alter_shard,add_shard,feed_id:,account_id:,domain:,shard_opt:,srv_name -n ' pgspiegel ' -- "$@")
+eval set -- "$GET_OPT"
+while true
+do
+ case "${1}" in
+   --check)
+       to_check="true" ;
+       shift 1 ;;
+   --conf)
+       config_file="${2}"        ;
+       shift 2                  ;;
+
+  --create)
+       create_flag=true        ;
+       add_shard_flag=false ;
+       alter_shard_flag=false ;
+       drop_flag=false         ;
+       monit_flag=false        ;
+       create_object="${2}"    ;
+       action_task="create_${create_object}"
+       shift 2                  ;;
+
+  --add_shard)
+     add_shard_flag=true ;
+     alter_shard_flag=false ;
+     create_flag=false        ;
+     drop_flag=false         ;
+     monit_flag=false        ;
+       action_task="add_shard"     ;
+     shift 1 ;;
+
+   --alter_shard)
+      add_shard_flag=false ;
+      alter_shard_flag=true ;
+      create_flag=false        ;
+      drop_flag=false         ;
+      monit_flag=false        ;
+       action_task="alter_shard"     ;
+      shift 1 ;;
+
+  --drop)
+     create_flag=false       ;
+     add_shard_flag=false ;
+     alter_shard_flag=false ;
+     drop_flag=true  ;
+     monit_flag=false ;
+     drop_object="${2}"    ;
+     action_task="drop_${drop_object}"
+     shift 2                  ;;
+
+  --monit)
+    create_flag=false       ;
+    drop_flag=false  ;
+    monit_flag=true ;
+    monit_object="${2}"    ;
+    action_task="monit_${monit_object}"
+    shift 2                  ;;
+
+   --resync)
+     create_flag=false ;
+     drop_flag=false  ;
+     monit_flag=false ;
+     resync_flag=true ;
+     action_task="resync_relation"
+     shift 1 ;;
+
+ --feed_id)
+     domain_predicat="feed_id" ;
+     domain_value_predicat=${2} ;
+     shift 2 ;;
+
+ --account_id)
+     domain_predicat="account_id" ;
+     domain_value_predicat=${2} ;
+     shift 2 ;;
+
+--domain)
+     domain_name="${2}";
+     shift 2 ;;
+
+--shard_opt)
+     shard_options="${2}" ;
+     shift 2 ;;
+
+  --item)
+        concern_item="${2}"      ;
+        shift 2                 ;;
+
+  --activate)
+       activate_sub=true ;
+       shift 1 ;;
+
+  --module)
+      module_name="${2}" ;
+      shift 2 ;;
+
+  --method)
+      method_name="${2}" ;
+      shift 2 ;;
+
+  --verbose)
+      isverbose="true"          ;
+      shift 1                  ;;
+
+   --dryrun)
+       dryrun="true"              ;
+       shift 1                  ;;
+   --color)
+       is_colored="true"         ;
+       shift 1                  ;;
+   --help)
+       f_usage                   ;
+       shift 1                  ;;
+   --)
+       shift                     ;
+       break                    ;;
+   *)
+       echo " Option ${*} is unknow " ; exit 2 ;;
+   esac
+
+done
+
+
+mkdir ${tmp_dir} -p
+trap "rm ${tmp_dir}/${action_task}.lock 2>/dev/null " EXIT
+
+# Requirements :
+
+f_requirements
+
+# Starting real work
+
+f_main
