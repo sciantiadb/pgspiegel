@@ -87,7 +87,7 @@ drop_flag=false
 monit_flag=false
 activate_sub=false
 resync_flag=false
-module_name="native"
+module_name="pgsql"
 method_name="ondisk"
 
 result=""
@@ -112,7 +112,7 @@ Usage : $(basename $0)  GENERAL_OPTIONS  TASKS_OPTIONS ...
 o General options:
 
    --conf    TEXT         All options availables for the replicaiton [ must be in ${cfg_dir} ]
-   --module  TEXT         Specify module name :  pglogical | native
+   --module  TEXT         Specify module name :  pglogical | pgsql
    --verbose              Active verbose mode
    --dryrun               Launch task wihout execute
 
@@ -175,7 +175,7 @@ o Monit options :
     \$ >  $(basename $0) --conf myconf.conf --monit subscription
 "
 ;;
-native)
+pgsql)
 
 echo "
 
@@ -188,7 +188,7 @@ Usage : $(basename $0)  GENERAL_OPTIONS  TASKS_OPTIONS ...
 o General options:
 
    --conf    TEXT         All options availables for the replicaiton [ must be in ${cfg_dir} ]
-   --module  TEXT         Specify module name :  pglogical | native
+   --module  TEXT         Specify module name :  pglogical | pgsql
    --verbose              Active verbose mode
    --dryrun               Launch task wihout execute
 
@@ -558,16 +558,16 @@ pglogical)
     exit 2
   fi
   ;;
-native)
-  if [ -f "${lib_dir}/native.lib" ]; then
-    source ${lib_dir}/native.lib
+pgsql)
+  if [ -f "${lib_dir}/pgsql.lib" ]; then
+    source ${lib_dir}/pgsql.lib
   else
-    f_log failed ${action_task} "Lib : ${lib_dir}/native.lib is missing "
+    f_log failed ${action_task} "Lib : ${lib_dir}/pgsql.lib is missing "
     exit 2
   fi
 ;;
 *)
-  f_log failed ${action_task} " Module ${module_name} is unknow . Available : pglogical | native  "
+  f_log failed ${action_task} " Module ${module_name} is unknow . Available : pglogical | pgsql"
 ;;
 esac
 
