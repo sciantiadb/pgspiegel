@@ -2,6 +2,7 @@
 #
 # ------------------------------------------------------------------------------
 #  Copyright (c) 2022, Guillaume ARMEDE & SciantiaDB
+#  For Lengow
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -735,10 +736,10 @@ if [ "${dryrun}" == "true" ];then
 else
     result=$( ${psql_sub_connexion}  -c "${resync_statement}" 2>> ${log_directory}/${tool}_${mainjobdate}.err )
     if [ $? -eq 0 ]; then
-     f_log success ${action_task} "Resynchronise specified item  : ${pub_schema}.${pub_relation_name} from ${sub_subscription_name} "
+     f_log success ${action_task} "Resynchronise subscription  ${sub_subscription_name} "
      return_code=0
     else
-     f_log failed ${action_task}  "Resynchronise specified item  : ${pub_schema}.${pub_relation_name} from ${sub_subscription_name} "
+     f_log failed ${action_task}  "Resynchronise subscription  ${sub_subscription_name} "
      return_code=1
     fi
 fi
